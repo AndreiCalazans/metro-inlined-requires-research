@@ -360,6 +360,9 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     <p>If you want deferred evaluation on Expo, you must enable <code>inlineRequires: true</code> yourself in
     <code>metro.config.js</code>. It composes fine with <code>experimentalImportSupport</code> — I verified that
     forcing it on pushes the <code>heavy</code>/<code>rare</code> requires back into the handlers, exactly like vanilla.</p>
+    <p style="margin-bottom:0">Scope caveat: this is plain Expo. We did <strong>not</strong> evaluate
+    <strong>Expo Router</strong>, which has its own routing/transform behavior — that's the subject of an
+    upcoming post.</p>
   </div>
 
   <p>Expo also ships an <em>experimental</em> tree-shaking / "reconcile" serializer
@@ -389,6 +392,10 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     and <em>reduces</em> the value of inline requires. The remaining win under Hermes is deferring module
     <strong>top-level evaluation</strong> (side effects, object construction) — not parse cost. Hermes does not
     benefit from "splitting" because there's no separate-chunk loading in React Native.</p>
+    <p style="margin-bottom:0">That said, deferral still helps <strong>cold start</strong>: whatever you keep off
+    the startup path — bytecode parsing/compilation of a function on first call, plus the module's top-level
+    evaluation — simply doesn't run at launch. The work isn't eliminated, it's moved to <em>when the feature is
+    actually used</em>, which is exactly what you want for time-to-interactive.</p>
   </div>
 
   <hr />
@@ -397,7 +404,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
   <p>In order of leverage:</p>
   <ol>
     <li><strong><code>inlineRequires: true</code></strong> — cheapest, global; defers module top-level
-    evaluation until first use. A good default for startup. (On Expo you must enable it explicitly.)</li>
+    evaluation until first use. A good default for startup. (On Expo you must enable it explicitly — note this
+    is plain Expo; we did <em>not</em> evaluate Expo Router here, which we'll cover in an upcoming post.)</li>
     <li><strong>Dynamic <code>import()</code> / <code>React.lazy</code> + <code>Suspense</code></strong> for
     genuinely on-demand-heavy work (a screen, a parser, a charting lib). In React Native it won't split files, but it
     moves evaluation off the startup path behind an explicit async boundary.</li>
