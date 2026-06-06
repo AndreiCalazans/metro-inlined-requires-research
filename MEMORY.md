@@ -115,3 +115,38 @@ Expo ALSO ships an experimental tree-shaking / "reconcile" serializer
 `inlineRequires`/`nonInlinedRequires` — this is the path that can actually
 remove code, unlike plain inlineRequires. Off by default.
 
+### rnx-kit (@rnx-kit/cli 2.0.1, metro-config 2.2.4, esbuild-serializer 0.4.1)
+
+Setup: `rnx-kit-app/` uses `@rnx-kit/metro-config` `makeMetroConfig` (Metro
+defaults + robust symlink/duplicate handling) and bundles via `rnx-cli bundle`.
+Shared source via symlink again. Needed `shared-app/package.json` so rnx-kit's
+TS plugin can find a "project root" for the shared files.
+
+**Plain rnx-kit bundle** = standard Metro `__d(...)` registry, eager requires
+(`var _heavy = _$$_REQUIRE(_dependencyMap[4])`). Same shape as vanilla. 506
+modules, 992 KB minified.
+
+**Tree shaking (`--tree-shake`)** swaps Metro's serializer for the **esbuild**
+serializer (`@rnx-kit/metro-serializer-esbuild`). Output is a totally different
+format: an esbuild IIFE bundle with `__commonJS` wrappers (and readable
+`// node_modules/...` path comments when unminified) — NOT Metro's `__d`
+registry.
+
+GOTCHA that cost real DCE: esbuild can only tree-shake ESM. Babel's
+`@react-native/babel-preset` rewrites `import/export` to CommonJS by default,
+which esbuild treats as opaque. Fix = `disableImportExportTransform: true` in
+babel preset for production tree-shake builds. rnx-cli's `--tree-shake` adds the
+esbuild serializer + `esbuildTransformerConfig`, but does NOT flip the babel
+option for you, so I gate it on `RNX_METRO_SERIALIZER_ESBUILD` env and set that
+env when bundling (also `--reset-cache` to avoid stale transform cache).
+
+Result with ESM preserved:
+- `deadExport` (unused) -> REMOVED from bundle (marker count 0).
+- Minified size 992 KB (plain) -> **807 KB (tree-shaken), ~19% smaller** — and
+  that's mostly unused code pruned across the whole graph (incl. react-native),
+  not just our one function.
+
+So rnx-kit's headline win over vanilla/Expo defaults = real **dead-code
+elimination / tree shaking**, which plain Metro (inlineRequires) does not do.
+`--metafile` emits an esbuild metafile for bundle analysis.
+

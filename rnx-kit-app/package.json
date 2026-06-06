@@ -1,0 +1,9 @@
+{
+  "name": "rnx-kit-app-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "bundle:plain": "rnx-cli bundle --entry-file index.js --platform ios --dev false --minify true --bundle-output out/plain.min.bundle",
+    "bundle:treeshake": "RNX_METRO_SERIALIZER_ESBUILD=1 rnx-cli bundle --entry-file index.js --platform ios --dev false --minify true --tree-shake --reset-cache --bundle-output out/treeshake.min.bundle --metafile out/meta.json"
+  }
+}
