@@ -474,7 +474,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     <p>① Inline requires defers <em>evaluation</em>, not inclusion — a startup win, not a size win.<br/>
     ② Expo SDK 56 ships <code>inlineRequires: false</code> by default; enable it yourself if you want it.<br/>
     ③ React Native is always one bundle — <code>import()</code> defers, it doesn't split; Hermes already lazy-compiles.<br/>
-    ④ Want a smaller bundle? You need tree shaking, and rnx-kit's esbuild path is the practical way to get it.</p>
+    ④ Want a smaller bundle? You need tree shaking, and rnx-kit's esbuild path is the practical way to get it.<br/>
+    ⑤ If turning on inline requires barely helps, look for <em>eager aggregators</em> (navigation stacks, routers) — they use imports at module-init, so only lazy registration fixes them. <a href="#fieldnote">(field note)</a></p>
   </div>
 
   <hr />
@@ -578,6 +579,103 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
   </table>
   <p class="small" style="color:var(--muted);font-size:13.5px">(Block-listed modules — react, react-native, jsx
   runtimes — stay eager in <em>both</em> columns regardless; see Q1.)</p>
+
+  <hr />
+
+  <h2 id="fieldnote">Field note — the day we turned on inline requires and (almost) nothing happened</h2>
+
+  <p>Here's the war story that motivated half of this post. On a large app at work we flipped
+  <code>inlineRequires</code> to <code>true</code>, expecting a nice startup win… and the needle barely moved.
+  The transform was doing its job — requires <em>were</em> being moved to use sites — but the startup graph
+  stayed almost as eager as before. Pulling apart a production bundle (tens of thousands of modules, ~85% of
+  its <code>require</code> calls sitting in eager <code>var x = require(d[n])</code> hoists) explained why.</p>
+
+  <p>The problem wasn't the modules inline requires <em>can</em> defer — it was a big structural class of
+  modules it <strong>can't</strong>: what I'll call <strong>eager aggregators</strong>. Remember the rule from
+  <a href="#q1">Q1</a>: the plugin moves a <code>require</code> to its <em>first use</em>. If the first use is at
+  module top-level — i.e. the module runs the imported code <em>while it is being evaluated</em> — there's
+  nowhere lazier to move it. It stays eager.</p>
+
+  <h3>Navigation stacks are the canonical offender</h3>
+  <p>A typical navigation stack imports every screen and then builds the navigator at module-init:</p>
+
+  <pre><code><span class="c">// AppStack.js — imports ALL screens, uses them immediately</span>
+<span class="k">import</span> Home <span class="k">from</span> <span class="s">'./HomeScreen'</span>;
+<span class="k">import</span> Settings <span class="k">from</span> <span class="s">'./SettingsScreen'</span>;
+<span class="k">import</span> Profile <span class="k">from</span> <span class="s">'./ProfileScreen'</span>;
+<span class="c">// ...200 more screens</span>
+
+<span class="k">export const</span> AppStack = <span class="fn">createStack</span>([
+  { name: <span class="s">'Home'</span>,     component: Home },      <span class="c">// used at module-init</span>
+  { name: <span class="s">'Settings'</span>, component: Settings },
+  { name: <span class="s">'Profile'</span>,  component: Profile },
+  <span class="c">// ...</span>
+]);</code></pre>
+
+  <p>Even with <code>inlineRequires: true</code>, the screen bindings are consumed inside the
+  <code>createStack([...])</code> argument, which executes the moment <code>AppStack</code> is required. So the
+  compiled module is just a wall of eager requires:</p>
+
+  <pre><code><span class="c">// what inline requires CANNOT improve — first use is module-init</span>
+<span class="k">var</span> Home=<span class="fn">i</span>(d[<span class="n">0</span>]),Settings=<span class="fn">i</span>(d[<span class="n">1</span>]),Profile=<span class="fn">i</span>(d[<span class="n">2</span>]),<span class="hl">/* …200 more eager requires… */</span>;
+_e.AppStack=<span class="fn">createStack</span>([{name:<span class="s">'Home'</span>,component:Home},{name:<span class="s">'Settings'</span>,component:Settings},<span class="c">/*…*/</span>]);</code></pre>
+
+  <p>Requiring this <em>one</em> module synchronously drags in 200+ screen subtrees. In the bundle I analyzed
+  there were <strong>well over a thousand</strong> of these eager aggregators — navigation stacks, deep-link
+  URL→destination routers (a routing table that references every destination module at init), and config
+  objects assembled at load time — collectively pulling tens of thousands of eager dependency edges into
+  startup. <code>inlineRequires</code> can't touch any of them, which is exactly why flipping the flag felt like
+  a no-op.</p>
+
+  <div class="callout surprise">
+    <h4>The fix is structural, not a flag</h4>
+    <p>Make the screen references <em>lazy</em> so the <code>require</code> lives inside a thunk that runs on
+    navigation, not at module load:</p>
+    <pre><code><span class="k">export const</span> AppStack = <span class="fn">createStack</span>([
+  { name: <span class="s">'Home'</span>, <span class="add">getComponent: () => <span class="fn">require</span>(<span class="s">'./HomeScreen'</span>).default</span> },
+  <span class="c">// or: React.lazy(() => import('./HomeScreen'))</span>
+]);</code></pre>
+    <p>Now each screen is a deferred require (React Navigation's <code>getComponent</code>) or an async chunk
+    boundary (<code>React.lazy</code> + <code>Suspense</code>). This is the change that actually moved our
+    startup numbers — far more than the global flag did.</p>
+  </div>
+
+  <h3>The full list of what falls through inline requires</h3>
+  <p>If you flip the flag and don't see the win you expected, it's almost certainly one of these eager-by-nature
+  categories:</p>
+  <table>
+    <thead><tr><th>Category</th><th>Why it stays eager</th><th>What helps</th></tr></thead>
+    <tbody>
+      <tr><td>Block-listed (<code>react</code>, <code>react-native</code>, jsx runtimes)</td><td>Excluded by Metro's <code>nonInlinedRequires</code> on purpose</td><td>nothing — and you don't want to</td></tr>
+      <tr><td>Side-effect-only imports (<code>import './polyfill'</code>)</td><td>No binding to move; emitted as a bare top-level <code>require()</code></td><td>only import them where actually needed</td></tr>
+      <tr><td><strong>Module-init usage</strong> (nav stacks, routers, HOCs, <code>class extends</code>, styled-components, store/saga registration)</td><td>First use <em>is</em> module evaluation → nowhere lazier to move it</td><td><code>getComponent</code> / <code>React.lazy</code> / explicit <code>() =&gt; require()</code> thunks</td></tr>
+      <tr><td>Whole-namespace <code>import * as ns</code> used as a unit</td><td>Spreading/enumerating the namespace forces the full module</td><td>access <code>ns.member</code> in deferred code instead</td></tr>
+      <tr><td>Babel-interop default/namespace imports</td><td><code>_interopRequireDefault</code> isn't matched (see annex)</td><td>let Metro lower imports (Expo already does)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Barrels, one more time — but now with the aggregator lens</h3>
+  <p>Barrel files split into three behaviors, and only one of them is a problem inline requires can fix:</p>
+  <ul>
+    <li><strong>Re-export barrels</strong> (<code>export { x } from './x'</code>) compile to live-binding
+    getters. With <code>inlineRequires</code> on, each source <code>require</code> moves into its getter and goes
+    lazy — <em>these the flag actually helps.</em></li>
+    <li><strong>Eager aggregators</strong> (the nav-stack/router shape above) reference their imports at init —
+    <em>the flag does nothing; you need lazy registration.</em></li>
+    <li><strong>Lazy registries</strong> (source-authored <code>() =&gt; require()</code> thunk maps, e.g. an
+    icon registry) are already deferred and ideal — aim for this shape when you build aggregators.</li>
+  </ul>
+  <p>And remember Metro doesn't tree-shake: even unused re-exports ship, so importing one symbol from a giant
+  barrel still wires up the whole thing.</p>
+
+  <div class="callout tldr">
+    <h4>If your inlineRequires win is disappointing</h4>
+    <p>Don't assume the transform is broken. Open the bundle and look for <strong>eager aggregators</strong> —
+    modules that <code>require</code> dozens of others and use them at load time (navigation stacks and routing
+    tables first). Inline requires can't defer module-init work; that needs <code>getComponent</code> /
+    <code>React.lazy</code> / thunked registration. The flag and the refactor are complementary, and the
+    refactor is usually where the startup time actually goes.</p>
+  </div>
 
   <footer>
     Built by bundling one shared React Native app three ways and reading the bytes.<br/>
