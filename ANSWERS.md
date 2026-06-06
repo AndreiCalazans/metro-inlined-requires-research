@@ -201,3 +201,59 @@ EXPO_INLINE=on npx expo export -p ios --no-bytecode --no-minify --output-dir dis
 cd rnx-kit-app && npm run bundle:plain && npm run bundle:treeshake
 #   compare out/plain.min.bundle vs out/treeshake.min.bundle (and out/meta.json)
 ```
+
+---
+
+## Annex — `_interopRequireDefault` and the import shape that defeats inline requires
+
+**When is `_interopRequireDefault` added?** It's a *Babel* helper emitted by
+`@babel/plugin-transform-modules-commonjs` (run by `@react-native/babel-preset`
+by default). The helper is chosen by the *kind* of import:
+
+| Import | Compiles to | Inlineable by Metro? |
+|--------|-------------|----------------------|
+| `import { x } from 'm'` (named) | `var _m = require('m')` | yes (bare require) |
+| `const x = require('m')` | `require('m')` | yes |
+| `import x from 'm'` (default) | `var _m = _interopRequireDefault(require('m'))` | **no** |
+| `import * as x from 'm'` (namespace) | `var _m = _interopRequireWildcard(require('m'))` | **no** |
+
+The wrappers exist to emulate ESM semantics over CommonJS (resolve `.default`
+based on the `__esModule` flag; build a frozen namespace object).
+
+**Why it defeats inline requires.** The inline-requires plugin only treats these
+shapes as inlineable: a bare `require()`, or `importDefault(require())` /
+`importAll(require())` — where `importDefault`/`importAll` are *Metro's* helpers
+(`_$$_IMPORT_DEFAULT` / `_$$_IMPORT_ALL`), set via
+`inlineableCalls: [importDefault, importAll]`. Babel's `_interopRequireDefault` /
+`_interopRequireWildcard` have different names, so they're not matched and stay
+hoisted (eager).
+
+**This is the catch:** on a stock React Native project (Babel lowers ESM),
+turning on `inlineRequires` does nothing for any dependency imported as a default
+or namespace import — which is most heavy libraries (`import moment`,
+`import axios`, `import * as d3`...). Only named imports and raw `require()` get
+deferred.
+
+**Proof (verified).** Fixture importing default + named + namespace, all used
+only inside `run()`:
+- Babel lowering (stock RN, inlineRequires:true):
+  `run(){ return (0,t.default)() + (0,_r(d[3]).named)() + r.alpha() + r.beta() }`
+  with `var t=_interopRequireDefault(...)`, `r=_interopRequireWildcard(...)` left
+  EAGER at module top. Only the named import inlined.
+- Metro lowering (`disableImportExportTransform:true` + `experimentalImportSupport:true`):
+  `run(){ return i(d[0])() + r(d[1]).named() + a(d[2]).alpha() + a(d[2]).beta() }`,
+  no top-level require vars — `i`=`_$$_IMPORT_DEFAULT`, `a`=`_$$_IMPORT_ALL`.
+  ALL imports inlined.
+
+**How to actually get deferral for default/namespace imports:**
+- Let Metro lower imports instead of Babel: `disableImportExportTransform: true`
+  on the RN babel preset + `experimentalImportSupport: true`.
+- Expo already lowers via Metro (its factories take `_$$_IMPORT_DEFAULT,
+  _$$_IMPORT_ALL`) — it just leaves `inlineRequires` off by default.
+- rnx-kit's esbuild path sidesteps the issue entirely (ESM preserved, esbuild
+  scope-hoists + tree-shakes).
+- Cheap heuristic: prefer named imports (`import { thing } from 'm'`) over default
+  imports where practical — they inline even under stock Babel.
+
+(Block-listed modules — react, react-native, jsx runtimes — stay eager in both
+lowering paths regardless; see Q1.)

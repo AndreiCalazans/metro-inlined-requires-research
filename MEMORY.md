@@ -69,9 +69,29 @@ Also: inline requires is NOT memoized by default
 (`unstable_memoizeInlineRequires: false`), so a module used twice in a handler
 emits `require()` twice (cheap — cached registry lookup).
 
+**INTEROP / LOWERING nuance (big one for "why don't I see a benefit?"):**
+The inline-requires plugin only inlines: bare `require()`, or
+`importDefault(require())` / `importAll(require())` (Metro's `_$$_IMPORT_DEFAULT`
+/ `_$$_IMPORT_ALL`, configured via `inlineableCalls:[importDefault,importAll]`).
+Babel's `_interopRequireDefault` / `_interopRequireWildcard` are NOT matched.
+Which one you get depends on WHO lowers ESM:
+- Babel lowering (stock `@react-native/babel-preset`): default imports ->
+  `_interopRequireDefault(require())`, namespace -> `_interopRequireWildcard`;
+  both stay EAGER even with inlineRequires:true. Only named imports / raw
+  require() inline. (Verified with fixtures/entry.js.)
+- Metro lowering (`disableImportExportTransform:true` + `experimentalImportSupport:true`):
+  default/namespace use `_$$_IMPORT_DEFAULT`/`_$$_IMPORT_ALL` -> inlineable ->
+  everything inlines (run() had zero top-level require vars). Expo uses this
+  lowering by default (factory sig has `_$$_IMPORT_DEFAULT,_$$_IMPORT_ALL`).
+- NOTE: setting `experimentalImportSupport:true` ALONE in getTransformOptions did
+  nothing for stock vanilla — babel still lowered first. You MUST also set the
+  preset's `disableImportExportTransform:true`. Full annex in ANSWERS.md.
+Repro: vanilla-rn/fixtures/* + metro.config.{classic,importsupport}.js.
+
 **Key takeaways:**
-- The transform = "move `require()` to first use" (minus the block list),
-  deferring *evaluation*, not *inclusion*.
+- The transform = "move `require()` to first use" (minus the block list and minus
+  Babel-interop-wrapped default/namespace imports), deferring *evaluation*, not
+  *inclusion*.
 - Bundle SIZE is essentially unchanged (eager 992,261 B vs inline 993,386 B —
   inline is even slightly larger). Module COUNT unchanged (506 vs 504).
 - The heavy module is STILL in the bundle (`HEAVY_MODULE_LOADED` present).

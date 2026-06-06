@@ -473,9 +473,111 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     <h4>Final takeaways</h4>
     <p>① Inline requires defers <em>evaluation</em>, not inclusion — a startup win, not a size win.<br/>
     ② Expo SDK 56 ships <code>inlineRequires: false</code> by default; enable it yourself if you want it.<br/>
-    ③ Native is always one bundle — <code>import()</code> defers, it doesn't split; Hermes already lazy-compiles.<br/>
+    ③ React Native is always one bundle — <code>import()</code> defers, it doesn't split; Hermes already lazy-compiles.<br/>
     ④ Want a smaller bundle? You need tree shaking, and rnx-kit's esbuild path is the practical way to get it.</p>
   </div>
+
+  <hr />
+
+  <h2>Annex — <code>_interopRequireDefault</code> &amp; the import shape that quietly defeats inline requires</h2>
+
+  <p>A reader question that deserves its own section: the post mentions that requires "wrapped in an interop
+  helper aren't matched" by the inline-requires plugin. <strong>When does that wrapper get added — and does it
+  mean a lot of modules silently stay eager even with <code>inlineRequires: true</code>?</strong> Short answer:
+  it depends entirely on <em>who lowers your ESM imports</em>, and on a default React Native setup the answer is
+  "yes, more than you'd think."</p>
+
+  <h3>When is <code>_interopRequireDefault</code> (or <code>_interopRequireWildcard</code>) added?</h3>
+  <p>These are <strong>Babel</strong> helpers, emitted by <code>@babel/plugin-transform-modules-commonjs</code>
+  (which <code>@react-native/babel-preset</code> runs by default). The helper depends on the <em>kind</em> of
+  import — not the module:</p>
+
+  <pre><code><span class="c">// 1. NAMED import  ->  bare require(), NO interop helper</span>
+<span class="k">import</span> { named } <span class="k">from</span> <span class="s">'m'</span>;
+<span class="c">// becomes:</span> <span class="k">var</span> _m = <span class="fn">require</span>(<span class="s">'m'</span>);            <span class="fn">_m</span>.named
+
+<span class="c">// 2. DEFAULT import  ->  _interopRequireDefault wrapper</span>
+<span class="k">import</span> def <span class="k">from</span> <span class="s">'m'</span>;
+<span class="c">// becomes:</span> <span class="k">var</span> _m = <span class="hl"><span class="fn">_interopRequireDefault</span></span>(<span class="fn">require</span>(<span class="s">'m'</span>)); <span class="fn">_m</span>.default
+
+<span class="c">// 3. NAMESPACE import  ->  _interopRequireWildcard wrapper</span>
+<span class="k">import</span> * <span class="k">as</span> ns <span class="k">from</span> <span class="s">'m'</span>;
+<span class="c">// becomes:</span> <span class="k">var</span> _m = <span class="hl"><span class="fn">_interopRequireWildcard</span></span>(<span class="fn">require</span>(<span class="s">'m'</span>)); <span class="fn">_m</span>.anything</code></pre>
+
+  <p>The wrappers exist to faithfully emulate ESM semantics over CommonJS: a default import has to resolve to
+  <code>module.exports.default</code> if the dependency is a real ES module (<code>__esModule</code> flag set), or
+  to <code>module.exports</code> itself if it's a plain CommonJS module; the wildcard helper builds a frozen
+  namespace object with a <code>default</code> key. So you get an interop wrapper precisely when you use a
+  <strong>default</strong> or <strong>namespace</strong> import — which is an <em>enormous</em> fraction of real
+  apps (<code>import React</code>, <code>import moment</code>, <code>import axios</code>, <code>import * as d3</code>…).</p>
+
+  <h3>Why the wrapper dodges the inline-requires plugin</h3>
+  <p>The plugin only treats three call shapes as "inlineable" (from
+  <code>metro-transform-worker</code>):</p>
+  <pre><code>inlineableCalls: [importDefault, importAll]   <span class="c">// + bare require() is always inlineable</span></code></pre>
+  <p>Here <code>importDefault</code>/<code>importAll</code> are <strong>Metro's</strong> runtime helpers
+  (<code>_$$_IMPORT_DEFAULT</code> / <code>_$$_IMPORT_ALL</code>), not Babel's. Babel's
+  <code>_interopRequireDefault</code> / <code>_interopRequireWildcard</code> have different names, so the plugin
+  doesn't recognize them and leaves those declarations hoisted. Net effect on a default RN setup:</p>
+  <ul>
+    <li>Named imports &amp; raw <code>require()</code> → <strong>inlined</strong> ✅</li>
+    <li>Default imports &amp; namespace imports → <strong>stay eager</strong> ❌ (even with <code>inlineRequires: true</code>)</li>
+  </ul>
+
+  <h3>Proof: same fixture, two lowering paths</h3>
+  <p>One entry imports a default-export, a named-export, and a namespace — all used only inside <code>run()</code>:</p>
+  <pre><code><span class="k">import</span> def <span class="k">from</span> <span class="s">'./def'</span>;          <span class="c">// default</span>
+<span class="k">import</span> { named } <span class="k">from</span> <span class="s">'./named'</span>;  <span class="c">// named</span>
+<span class="k">import</span> * <span class="k">as</span> star <span class="k">from</span> <span class="s">'./star'</span>; <span class="c">// namespace</span>
+<span class="k">export function</span> <span class="fn">run</span>() { <span class="k">return</span> <span class="fn">def</span>() + <span class="fn">named</span>() + star.<span class="fn">alpha</span>() + star.<span class="fn">beta</span>(); }</code></pre>
+
+  <p class="pre-label bad">Babel lowering — the React Native default (inlineRequires: true)</p>
+  <pre><code><span class="c">// default & namespace stay hoisted; only the named import is inlined</span>
+.run=<span class="k">function</span>(){ <span class="k">return</span>(<span class="n">0</span>,<span class="hl">t</span>.default)()+(<span class="n">0</span>,<span class="fn">_r</span>(d[<span class="n">3</span>]).named)()+<span class="hl">r</span>.<span class="fn">alpha</span>()+<span class="hl">r</span>.<span class="fn">beta</span>() };
+<span class="k">var</span> <span class="hl">t</span>=<span class="fn">e</span>(<span class="fn">_r</span>(d[<span class="n">1</span>])),<span class="hl">r</span>=(<span class="c">/* _interopRequireWildcard */</span>)(<span class="fn">_r</span>(d[<span class="n">2</span>]));  <span class="c">// EAGER</span></code></pre>
+
+  <p class="pre-label good">Metro lowering — disableImportExportTransform: true + experimentalImportSupport: true</p>
+  <pre><code><span class="c">// every import inlined into run(); no top-level require vars at all</span>
+.run=<span class="k">function</span>(){ <span class="k">return</span> <span class="hl"><span class="fn">i</span>(d[<span class="n">0</span>])</span>()+<span class="fn">r</span>(d[<span class="n">1</span>]).named()+<span class="hl"><span class="fn">a</span>(d[<span class="n">2</span>])</span>.alpha()+<span class="hl"><span class="fn">a</span>(d[<span class="n">2</span>])</span>.beta() }},<span class="n">0</span>,[<span class="n">1</span>,<span class="n">2</span>,<span class="n">3</span>]);
+<span class="c">//          ^_$$_IMPORT_DEFAULT      ^require           ^_$$_IMPORT_ALL</span></code></pre>
+
+  <div class="callout surprise">
+    <h4>The catch the question is pointing at</h4>
+    <p>On a <strong>stock React Native</strong> project (Babel lowers ESM), flipping on <code>inlineRequires</code>
+    does <em>nothing</em> for any module you pull in via <code>import X from 'm'</code> or
+    <code>import * as X from 'm'</code> — they're wrapped in <code>_interopRequireDefault</code> /
+    <code>_interopRequireWildcard</code> and stay eager. If your heavy dependencies are default/namespace imports
+    (most are), the startup win can be much smaller than expected.</p>
+  </div>
+
+  <h3>How to actually get the deferral</h3>
+  <ul>
+    <li><strong>Let Metro lower imports instead of Babel.</strong> Set
+      <code>disableImportExportTransform: true</code> on <code>@react-native/babel-preset</code> and keep
+      <code>experimentalImportSupport: true</code>. Now default/namespace imports compile to the inlineable
+      <code>_$$_IMPORT_DEFAULT</code>/<code>_$$_IMPORT_ALL</code> helpers.</li>
+    <li><strong>Expo already does this.</strong> Its bundle factories are
+      <code>function (global, require, _$$_IMPORT_DEFAULT, _$$_IMPORT_ALL, …)</code> — Metro lowering is on by
+      default (which is also why Expo can run its experimental tree-shaking). The only thing Expo leaves off is
+      <code>inlineRequires</code> itself.</li>
+    <li><strong>rnx-kit</strong> reaches the same place from the other direction: its esbuild path needs ESM
+      preserved (<code>disableImportExportTransform</code>) and then esbuild does scope hoisting + DCE, so the
+      "interop wrapper blocks inlining" problem doesn't apply at all.</li>
+    <li><strong>Cheap heuristic:</strong> prefer <code>import { thing } from 'm'</code> (named) over
+      <code>import m from 'm'</code> when you can — named imports inline even under the stock Babel pipeline.</li>
+  </ul>
+
+  <table>
+    <thead><tr><th>Import shape</th><th>Babel lowering (stock RN)</th><th>Metro lowering (Expo / disable+IS)</th></tr></thead>
+    <tbody>
+      <tr><td><code>import { x } from 'm'</code></td><td><span class="yes">inlined</span></td><td><span class="yes">inlined</span></td></tr>
+      <tr><td><code>const x = require('m')</code></td><td><span class="yes">inlined</span></td><td><span class="yes">inlined</span></td></tr>
+      <tr><td><code>import x from 'm'</code></td><td><span class="no">eager</span> (<code>_interopRequireDefault</code>)</td><td><span class="yes">inlined</span> (<code>_$$_IMPORT_DEFAULT</code>)</td></tr>
+      <tr><td><code>import * as x from 'm'</code></td><td><span class="no">eager</span> (<code>_interopRequireWildcard</code>)</td><td><span class="yes">inlined</span> (<code>_$$_IMPORT_ALL</code>)</td></tr>
+    </tbody>
+  </table>
+  <p class="small" style="color:var(--muted);font-size:13.5px">(Block-listed modules — react, react-native, jsx
+  runtimes — stay eager in <em>both</em> columns regardless; see Q1.)</p>
 
   <footer>
     Built by bundling one shared React Native app three ways and reading the bytes.<br/>
