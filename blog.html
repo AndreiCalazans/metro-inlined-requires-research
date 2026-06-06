@@ -360,9 +360,9 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     <p>If you want deferred evaluation on Expo, you must enable <code>inlineRequires: true</code> yourself in
     <code>metro.config.js</code>. It composes fine with <code>experimentalImportSupport</code> — I verified that
     forcing it on pushes the <code>heavy</code>/<code>rare</code> requires back into the handlers, exactly like vanilla.</p>
-    <p style="margin-bottom:0">Scope caveat: this is plain Expo. We did <strong>not</strong> evaluate
-    <strong>Expo Router</strong>, which has its own routing/transform behavior — that's the subject of an
-    upcoming post.</p>
+    <p style="margin-bottom:0">Scope caveat: this is plain Expo. <strong>Expo Router</strong> adds its own
+    routing behavior on top — see the <a href="#expo-router">Expo Router section</a> below, where its
+    file-based routes turn out to be lazy by default.</p>
   </div>
 
   <p>Expo also ships an <em>experimental</em> tree-shaking / "reconcile" serializer
@@ -404,8 +404,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
   <p>In order of leverage:</p>
   <ol>
     <li><strong><code>inlineRequires: true</code></strong> — cheapest, global; defers module top-level
-    evaluation until first use. A good default for startup. (On Expo you must enable it explicitly — note this
-    is plain Expo; we did <em>not</em> evaluate Expo Router here, which we'll cover in an upcoming post.)</li>
+    evaluation until first use. A good default for startup. (On Expo you must enable it explicitly. Note that
+    <a href="#expo-router">Expo Router</a> separately makes screens lazy by default, independent of this flag.)</li>
     <li><strong>Dynamic <code>import()</code> / <code>React.lazy</code> + <code>Suspense</code></strong> for
     genuinely on-demand-heavy work (a screen, a parser, a charting lib). In React Native it won't split files, but it
     moves evaluation off the startup path behind an explicit async boundary.</li>
@@ -484,7 +484,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     ② Expo SDK 56 ships <code>inlineRequires: false</code> by default; enable it yourself if you want it.<br/>
     ③ React Native is always one bundle — <code>import()</code> defers, it doesn't split; Hermes already lazy-compiles.<br/>
     ④ Want a smaller bundle? You need tree shaking, and rnx-kit's esbuild path is the practical way to get it.<br/>
-    ⑤ If turning on inline requires barely helps, look for <em>eager aggregators</em> (navigation stacks, routers) — they use imports at module-init, so only lazy registration fixes them. <a href="#fieldnote">(field note)</a></p>
+    ⑤ If turning on inline requires barely helps, look for <em>eager aggregators</em> (navigation stacks, routers) — they use imports at module-init, so only lazy registration fixes them. <a href="#fieldnote">(field note)</a><br/>
+    ⑥ Expo Router gives screen-level lazy loading by default (via React Navigation's <code>getComponent</code> thunk) — the eager-aggregator fix, for free. <a href="#expo-router">(bonus)</a></p>
   </div>
 
   <hr />
@@ -686,6 +687,80 @@ _e.AppStack=<span class="fn">createStack</span>([{name:<span class="s">'Home'</s
     refactor is usually where the startup time actually goes.</p>
   </div>
 
+  <hr />
+
+  <h2 id="expo-router">Bonus — does Expo Router actually give you screen-level lazy loading?</h2>
+
+  <p>The field note ends on a manual fix: wrap screens in <code>getComponent</code> / <code>React.lazy</code> so
+  a navigation stack doesn't drag every screen into startup. <strong>Expo Router promises to do exactly this for
+  you</strong> via file-based routing. I wanted to verify it actually does — and how — so I built a small
+  Expo Router app (<code>app/_layout.js</code>, <code>index</code>, <code>one</code>, <code>two</code>,
+  <code>heavy</code>, each screen importing a uniquely-tagged heavy module) and pulled apart the export.</p>
+
+  <p>The verdict: <strong>yes, and it's lazy by default</strong> — even in the default "sync" import mode, and
+  independent of <code>inlineRequires</code>. Here's the machinery.</p>
+
+  <h3>① Routes live behind getters, not eager requires</h3>
+  <p>Expo Router discovers routes with <code>require.context('./app')</code>, which Metro compiles into a context
+  module whose entries are <strong>enumerable getters</strong> — the <code>require()</code> only fires when a key
+  is read, and listing the keys doesn't load anything:</p>
+  <pre><code><span class="c">// the generated require.context module — note: requires are inside getters</span>
+<span class="k">var</span> map = Object.defineProperties({}, {
+  <span class="s">"./index.js"</span>: { enumerable: true, <span class="fn">get</span>() { <span class="k">return</span> <span class="fn">require</span>(_dependencyMap[<span class="n">2</span>]); } },
+  <span class="s">"./one.js"</span>:   { enumerable: true, <span class="fn">get</span>() { <span class="k">return</span> <span class="fn">require</span>(_dependencyMap[<span class="n">3</span>]); } },
+  <span class="s">"./two.js"</span>:   { enumerable: true, <span class="fn">get</span>() { <span class="k">return</span> <span class="fn">require</span>(_dependencyMap[<span class="n">4</span>]); } },
+  <span class="c">// ...</span>
+});
+metroContext.keys = () => Object.keys(map);  <span class="c">// lists routes WITHOUT loading them</span></code></pre>
+
+  <h3>② Each screen is registered as a <code>getComponent</code> thunk</h3>
+  <p>When building the React Navigation navigator, Expo Router hands every route a <em>thunk</em>, not a resolved
+  component (from <code>useScreens.js</code>):</p>
+  <pre><code><span class="k">function</span> <span class="fn">routeToScreen</span>(route, ...) {
+  <span class="k">return</span> createElement(Screen, {
+    name: route.route,
+    <span class="hl">getComponent: () => <span class="fn">getQualifiedRouteComponent</span>(route)</span>,  <span class="c">// lazy — called on first navigation</span>
+  });
+}</code></pre>
+  <p>React Navigation only invokes <code>getComponent()</code> when the screen is first navigated to. In the
+  default <strong>sync</strong> import mode (<code>EXPO_ROUTER_IMPORT_MODE</code> defaults to <code>'sync'</code>
+  on native), <code>getQualifiedRouteComponent</code> then calls <code>loadRoute()</code> — a synchronous
+  <code>require</code> of that screen, off the startup path. In <strong>lazy</strong> mode it instead returns
+  <code>React.lazy(() =&gt; loadRoute())</code> behind <code>Suspense</code>.</p>
+
+  <h3>③ Proof: route discovery loads zero screens</h3>
+  <p>Talk is cheap, so I ran Expo Router's <em>real</em> <code>getRoutes()</code> against an instrumented
+  <code>require.context</code> that records every module load
+  (<code>expo-router-app/router_probe.js</code> in the repo):</p>
+  <pre><code><span class="c">$ node router_probe.js</span>
+Modules LOADED during route discovery: [ <span class="s">'./_layout.js'</span> ]
+Leaf routes (each behind a lazy loadRoute thunk): [ <span class="s">'index'</span>,<span class="s">'one'</span>,<span class="s">'two'</span>,<span class="s">'heavy'</span>,<span class="s">'_sitemap'</span>,<span class="s">'+not-found'</span> ]
+Leaf modules loaded at discovery time: <span class="add">0 / 6</span></code></pre>
+  <p>Only the <code>_layout</code> loads at discovery (to read <code>unstable_settings</code>). Every leaf screen
+  — and transitively its heavy deps — stays unloaded until you navigate to it. This is precisely the
+  eager-aggregator fix from the field note, except the framework does it for you.</p>
+
+  <div class="callout warn">
+    <h4>Caveats worth knowing</h4>
+    <ul style="margin:6px 0 0">
+      <li><strong>Layouts on the active path are eager</strong> — they have to render. Keep <code>_layout</code>
+      files light; heavy work in a root layout loads at startup for everything beneath it.</li>
+      <li><strong>The initial route loads at startup</strong> (it renders immediately); only the <em>other</em>
+      routes are deferred.</li>
+      <li><strong>Still one bundle on native</strong> — sync mode means a synchronous <code>require</code> on
+      navigation, not a downloaded chunk. <code>asyncRoutes</code> (the <code>React.lazy</code>/Suspense path,
+      and real chunks on web) is configured under <code>extra.router.asyncRoutes</code> and is web/dev-oriented;
+      a production native export stayed in <code>sync</code> mode in my tests. The deferral on native comes from
+      <code>getComponent</code> either way.</li>
+      <li><strong>Independent of <code>inlineRequires</code></strong> — this is an architecture win from the
+      router, not the transform. (inlineRequires still defaults off here; the two are complementary.)</li>
+    </ul>
+  </div>
+
+  <p>So if you're fighting eager navigation stacks by hand, file-based Expo Router routes are lazy by
+  construction — a strong argument for the routing layer doing this rather than every team re-deriving the
+  <code>getComponent</code> pattern.</p>
+
   <div class="callout">
     <h4>Source code</h4>
     <p style="margin-bottom:0">All three setups, the shared app, the fixtures, and the full research notes live
@@ -696,7 +771,8 @@ _e.AppStack=<span class="fn">createStack</span>([{name:<span class="s">'Home'</s
 
   <footer>
     Built by bundling one shared React Native app three ways and reading the bytes.<br/>
-    Reproduce: <code>npm run bundle:*</code> in each of <code>vanilla-rn/</code>, <code>expo-app/</code>, <code>rnx-kit-app/</code> —
+    Reproduce: bundle in <code>vanilla-rn/</code>, <code>expo-app/</code>, <code>rnx-kit-app/</code>, and
+    <code>expo-router-app/</code> (run <code>node router_probe.js</code> there for the route-loading proof) —
     full source at <a href="https://github.com/AndreiCalazans/metro-inlined-requires-research" target="_blank" rel="noopener">AndreiCalazans/metro-inlined-requires-research</a>.
   </footer>
 

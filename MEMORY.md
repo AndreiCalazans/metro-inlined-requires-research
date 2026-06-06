@@ -222,3 +222,62 @@ inlineRequires/`import()` under Hermes is deferring module top-level
 Inline requires barely moves SIZE — it's a startup/TTI lever. Tree shaking is
 the only one of these that meaningfully shrinks the bundle.
 
+
+### Expo Router (expo-router 56.2.9, Expo SDK 56, RN 0.85.3)
+
+Setup: `expo-router-app/` — file-based routing. `app/` has `_layout.js`,
+`index.js`, `one.js`, `two.js`, `heavy.js`. Each non-home screen imports a
+heavy dep with a unique marker (`one-heavy.js`, `heavy-screen-dep.js`).
+`main: "expo-router/entry"`. Built with `expo export --platform ios`.
+
+**Promise checked: does Expo Router do screen-level lazy loading? YES — by
+default, even in "sync" mode.**
+
+How it works (the mechanics, verified in the emitted bundle + source):
+1. `require.context('./app')` compiles to a context module whose route entries
+   are behind **enumerable getters** — each `require(d[n])` only fires when the
+   key is accessed; `ctx.keys()` (Object.keys) lists routes WITHOUT loading:
+   ```js
+   var map = Object.defineProperties({}, {
+     "./index.js": { enumerable:true, get(){ return require(_dependencyMap[2]); } },
+     "./one.js":   { enumerable:true, get(){ return require(_dependencyMap[3]); } },
+     ... });
+   ```
+2. Expo Router builds the route tree from `ctx.keys()`. During discovery it only
+   calls `loadRoute()` for **layout** nodes (to read `unstable_settings`); leaf
+   routes are NOT loaded. (The dev-only `validateRouteTreeExports` loadRoute is
+   gated by `NODE_ENV!=='development'`.)
+3. Each route is handed to React Navigation as
+   `routeToScreen` -> `<Screen getComponent={() => getQualifiedRouteComponent(route)} />`
+   (useScreens.js:359). **`getComponent` is a thunk** — React Navigation only
+   calls it when the screen is first navigated to/mounted.
+4. `getQualifiedRouteComponent`: `import_mode` is `process.env.EXPO_ROUTER_IMPORT_MODE
+   || 'sync'`. In **sync** (the native default) it calls `loadRoute()` (a sync
+   require) inside getComponent → screen module required on first navigation. In
+   **lazy** it wraps `React.lazy(() => loadRoute())` + Suspense.
+
+**Empirical proof** (`expo-router-app/router_probe.js` runs the REAL
+`getRoutes` against an instrumented context): during discovery only
+`./_layout.js` loads; **0/6 leaf route modules** load. Each leaf is behind a
+lazy `loadRoute` thunk. So `one.js`/`two.js`/`heavy.js` (and their heavy deps)
+are only required when you navigate to them.
+
+**So Expo Router gives the `getComponent` pattern automatically** — the exact fix
+I recommended for the eager-aggregator navigation stacks in the field note. With
+hand-rolled React Navigation you must opt into `getComponent`/`React.lazy`;
+file-based Expo Router routes are lazy by construction.
+
+**Caveats:**
+- Layouts on the active path are eager (they must render) — keep `_layout` files
+  light; heavy work in a layout loads at startup for everyone underneath it.
+- The initial/focused route (`index`) loads at startup (it renders immediately);
+  only the OTHER routes are deferred.
+- Still ONE bundle on native (no separate chunks) — sync mode = synchronous
+  require on navigation (brief work, off the startup path).
+- `asyncRoutes` (lazy import mode → `React.lazy` + Suspense, real chunks on web)
+  is read from `extra.router.asyncRoutes`, not `experiments`. Enabling it for a
+  production iOS export kept import mode `"sync"` (async/lazy routes are
+  web/dev-oriented; native production stays sync). Native deferral comes from
+  `getComponent` regardless.
+- inlineRequires still defaults OFF here too (it's plain Expo Metro). Screen-level
+  laziness is independent of inlineRequires — it's a routing/architecture win.

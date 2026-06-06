@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "expo-router-app-bundle",
+    "slug": "expo-router-app-bundle",
+    "version": "1.0.0",
+    "platforms": ["ios", "android"],
+    "scheme": "exporouterapp",
+    "extra": { "router": { "asyncRoutes": true } }
+  }
+}
