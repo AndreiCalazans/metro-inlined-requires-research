@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>How Metro Inlined Requires Really Work (Vanilla RN vs Expo vs rnx-kit)</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #161922;
+    --panel-2: #1c2030;
+    --text: #d7dce5;
+    --muted: #8b93a7;
+    --accent: #7aa2f7;
+    --accent-2: #9ece6a;
+    --warn: #e0af68;
+    --danger: #f7768e;
+    --border: #262b3a;
+    --code-bg: #0b0d13;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px 120px; }
+  header.hero {
+    padding: 72px 24px 48px;
+    background: radial-gradient(1200px 400px at 50% -10%, rgba(122,162,247,0.18), transparent 60%);
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  header.hero .kicker {
+    text-transform: uppercase; letter-spacing: 0.18em; font-size: 12px;
+    color: var(--accent); font-weight: 700; margin-bottom: 14px;
+  }
+  header.hero h1 {
+    font-size: 40px; line-height: 1.15; margin: 0 auto 18px; max-width: 720px;
+    background: linear-gradient(90deg, #fff, #a9b6d6);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  header.hero p.sub { color: var(--muted); max-width: 640px; margin: 0 auto; font-size: 18px; }
+  .meta { color: var(--muted); font-size: 14px; margin-top: 22px; }
+  .tag {
+    display: inline-block; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--muted); border-radius: 999px; padding: 3px 12px; font-size: 12.5px; margin: 4px;
+  }
+
+  h2 { font-size: 28px; margin: 64px 0 8px; scroll-margin-top: 20px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  h3 { font-size: 20px; margin: 34px 0 6px; color: #eef1f7; }
+  p { margin: 14px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  strong { color: #fff; }
+  code {
+    font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 14px; background: var(--panel-2); padding: 2px 6px; border-radius: 5px;
+    color: #cdd6f4;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.6;
+    margin: 18px 0;
+  }
+  pre code { background: none; padding: 0; color: #c8d3f5; font-size: 13.5px; }
+  .pre-label {
+    font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); margin: 22px 0 -8px; font-weight: 600;
+  }
+  .pre-label.bad { color: var(--danger); }
+  .pre-label.good { color: var(--accent-2); }
+
+  /* token coloring */
+  .c { color: #565f89; font-style: italic; } /* comment */
+  .k { color: #bb9af7; } /* keyword */
+  .s { color: #9ece6a; } /* string */
+  .fn { color: #7aa2f7; } /* function/identifier of note */
+  .n { color: #ff9e64; } /* number */
+  .hl { background: rgba(224,175,104,0.16); border-radius: 3px; }
+  .del { background: rgba(247,118,142,0.14); }
+  .add { background: rgba(158,206,106,0.14); }
+
+  .callout {
+    border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    background: var(--panel); border-radius: 10px; padding: 16px 20px; margin: 24px 0;
+  }
+  .callout.tldr { border-left-color: var(--accent-2); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.surprise { border-left-color: var(--danger); }
+  .callout h4 { margin: 0 0 8px; font-size: 15px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--muted); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout p:first-of-type { margin-top: 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 14.5px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:hover td { background: var(--panel); }
+  td .yes { color: var(--accent-2); font-weight: 700; }
+  td .no { color: var(--danger); font-weight: 700; }
+
+  .toc {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 24px; margin: 40px 0;
+  }
+  .toc h4 { margin: 0 0 10px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .toc ol { margin: 0; padding-left: 20px; }
+  .toc li { margin: 6px 0; }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 28px 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card h5 { margin: 0 0 6px; font-size: 16px; }
+  .card .big { font-size: 26px; font-weight: 800; color: #fff; }
+  .card .small { color: var(--muted); font-size: 13px; }
+  @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } header.hero h1 { font-size: 30px; } }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 56px 0; }
+  footer { color: var(--muted); font-size: 14px; text-align: center; padding-top: 30px; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="kicker">React Native · Metro · Bundle Internals</div>
+  <h1>How Metro Inlined Requires Really Work</h1>
+  <p class="sub">A hands-on teardown of the <em>final bundle output</em> across vanilla React Native,
+  Expo, and rnx-kit — with the actual bytes Metro and esbuild emit.</p>
+  <div class="meta">
+    <span class="tag">React Native 0.85.3</span>
+    <span class="tag">Metro 0.84.4</span>
+    <span class="tag">Expo SDK 56</span>
+    <span class="tag">@rnx-kit/cli 2.0.1</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="callout tldr">
+    <h4>TL;DR</h4>
+    <p>Inline requires moves <code>require()</code> to the first use site to defer <em>evaluation</em> —
+    it does <strong>not</strong> remove code and does <strong>not</strong> split the bundle. Expo SDK 56
+    does <strong>not</strong> enable inline requires by default (it uses <code>experimentalImportSupport</code>).
+    Only rnx-kit's esbuild tree-shaking actually shrinks the bundle (≈19% here). On native there is one
+    bundle; <code>import()</code> defers evaluation, it doesn't create chunks.</p>
+  </div>
+
+  <p>Everyone "knows" you should flip on <code>inlineRequires</code> for faster React Native startup. But
+  what does that flag actually do to the bytes that ship? Does Expo do it for you? Does rnx-kit do
+  something fundamentally different? I wired a <strong>single shared app</strong> into three real bundling
+  setups and diffed the output. The results had a couple of genuine surprises.</p>
+
+  <div class="toc">
+    <h4>The questions</h4>
+    <ol>
+      <li><a href="#q1">How do inlined requires work?</a></li>
+      <li><a href="#q2">What does the bundle look like with <code>inlineRequires: true</code>?</a></li>
+      <li><a href="#q3">How does Expo change Metro's behavior?</a></li>
+      <li><a href="#q4">Does Metro support bundle splitting? Does Hermes benefit?</a></li>
+      <li><a href="#q5">When you want to defer JS work, what pattern should you use?</a></li>
+      <li><a href="#q6">How does rnx-kit help?</a></li>
+    </ol>
+  </div>
+
+  <h3>The test setup</h3>
+  <p>All three setups consume the exact same <code>shared-app/src/App.js</code>. The trick is to import
+  modules at the <em>top</em> of the file but only use them inside event handlers — that's the shape that
+  makes the inline-requires transform visible in the output.</p>
+
+  <pre><code><span class="c">// shared-app/src/App.js — top-level imports, but used only in handlers</span>
+<span class="k">import</span> { heavyCompute, HEAVY_TAG } <span class="k">from</span> <span class="s">'./heavy'</span>;
+<span class="k">import</span> { formatRare } <span class="k">from</span> <span class="s">'./rarely-used'</span>;
+
+<span class="k">export default function</span> <span class="fn">App</span>() {
+  <span class="k">const</span> runHeavy = () => {
+    <span class="k">const</span> result = <span class="fn">heavyCompute</span>(<span class="n">1000</span>);   <span class="c">// first use of heavy</span>
+    setOutput(<span class="s">`${HEAVY_TAG}: ${result}`</span>);
+  };
+  <span class="k">const</span> runRare  = () => setOutput(<span class="fn">formatRare</span>(<span class="s">'inlined requires'</span>));
+  <span class="k">const</span> runLazy  = <span class="k">async</span> () => {
+    <span class="k">const</span> { lazyGreeting } = <span class="k">await</span> <span class="fn">import</span>(<span class="s">'./lazy'</span>);  <span class="c">// dynamic import</span>
+    setOutput(<span class="fn">lazyGreeting</span>());
+  };
+  <span class="c">/* ...renders Buttons wired to the handlers... */</span>
+}</code></pre>
+
+  <table>
+    <thead><tr><th>Folder</th><th>Stack</th><th>Bundler command</th></tr></thead>
+    <tbody>
+      <tr><td><code>vanilla-rn/</code></td><td>RN 0.85.3 + Metro 0.84.4</td><td><code>react-native bundle</code></td></tr>
+      <tr><td><code>expo-app/</code></td><td>Expo SDK 56</td><td><code>expo export</code></td></tr>
+      <tr><td><code>rnx-kit-app/</code></td><td>@rnx-kit/cli + esbuild serializer</td><td><code>rnx-cli bundle</code></td></tr>
+    </tbody>
+  </table>
+
+  <hr />
+
+  <h2 id="q1"><span class="num">01</span>How do inlined requires work?</h2>
+  <p>Inline requires is a Babel transform (<code>metro-transform-plugins</code> → <code>inline-requires</code>).
+  It rewrites a module so that <code>require()</code> calls are <strong>not executed at module-load time</strong>.
+  Instead, each <code>require()</code> is moved to — inlined at — the <strong>first place the binding is used</strong>.</p>
+
+  <p class="pre-label bad">Before — eager (runs on module load)</p>
+  <pre><code><span class="k">var</span> _heavy = <span class="fn">require</span>(_dependencyMap[<span class="n">2</span>]); <span class="c">// evaluated when this module loads</span>
+<span class="k">function</span> <span class="fn">onPress</span>() { _heavy.<span class="fn">heavyCompute</span>(<span class="n">1000</span>); }</code></pre>
+
+  <p class="pre-label good">After — inline / lazy (runs on first use)</p>
+  <pre><code><span class="c">// no top-level require for heavy</span>
+<span class="k">function</span> <span class="fn">onPress</span>() { <span class="fn">require</span>(_dependencyMap[<span class="n">2</span>]).<span class="fn">heavyCompute</span>(<span class="n">1000</span>); }</code></pre>
+
+  <p>Three things follow from this:</p>
+  <ul>
+    <li>The imported module's <strong>top-level code runs lazily</strong> — only when the path that needs it first executes. That's the startup / time-to-interactive win.</li>
+    <li>It's purely a <em>when-does-it-evaluate</em> change. The module is <strong>still in the bundle</strong>; nothing is removed or split out.</li>
+    <li>Bindings used on the render path (e.g. <code>react-native</code> in JSX) stay hoisted; only bindings used <em>solely</em> inside deferred code get inlined.</li>
+  </ul>
+
+  <hr />
+
+  <h2 id="q2"><span class="num">02</span>What does the bundle look like with <code>inlineRequires: true</code>?</h2>
+  <p>I built <code>vanilla-rn/</code> twice with configs that differ only in
+  <code>transformer.getTransformOptions().transform.inlineRequires</code>. Here is the actual emitted
+  <code>App</code> module factory (Metro wraps every module in <code>__d(factory, moduleId, dependencyMap)</code>).</p>
+
+  <p class="pre-label bad">inlineRequires: false — all requires hoisted &amp; evaluated at module init</p>
+  <pre><code><span class="c">// tail of the factory: every dependency required up-front</span>
+...,o=<span class="fn">_r</span>(d[<span class="n">4</span>]),u=<span class="fn">_r</span>(d[<span class="n">5</span>]),i=<span class="fn">_r</span>(d[<span class="n">6</span>])},2,[1,3,9,11,<span class="hl">504</span>,<span class="hl">505</span>,257]);
+<span class="c">//        ^heavy    ^rare  evaluated on load</span>
+onPress:()=>{ (<span class="n">0</span>,o.<span class="fn">heavyCompute</span>)(<span class="n">1e3</span>) }   <span class="c">// uses pre-required binding `o`</span></code></pre>
+
+  <p class="pre-label good">inlineRequires: true — only render-path requires stay at top; handlers require lazily</p>
+  <pre><code>...,n=<span class="fn">_r</span>(d[<span class="n">3</span>]),o=<span class="fn">_r</span>(d[<span class="n">4</span>])},2,[1,3,9,11,243,502,503]);  <span class="c">// react-native + jsx only</span>
+
+onPress:()=>{ <span class="k">var</span> e=(<span class="n">0</span>,<span class="hl"><span class="fn">_r</span>(d[<span class="n">5</span>])</span>.<span class="fn">heavyCompute</span>)(<span class="n">1e3</span>); <span class="hl"><span class="fn">_r</span>(d[<span class="n">5</span>])</span>.HEAVY_TAG }
+onPress:()=>{ <span class="hl"><span class="fn">_r</span>(d[<span class="n">6</span>])</span>.<span class="fn">formatRare</span>(<span class="s">'inlined requires'</span>) }</code></pre>
+
+  <p>Notice <code>react-native</code> (used during render) stays hoisted as <code>n=_r(d[3])</code>, while
+  <code>heavy</code> and <code>rare</code> got pushed <em>into</em> the click handlers.</p>
+
+  <div class="cards">
+    <div class="card"><h5>Module count</h5><div class="big">506 → 504</div><div class="small">essentially unchanged</div></div>
+    <div class="card"><h5>Bundle size</h5><div class="big">992 KB</div><div class="small">eager 992,261 B vs inline 993,386 B — inline is even <em>bigger</em></div></div>
+    <div class="card"><h5>Heavy module</h5><div class="big">still shipped</div><div class="small"><code>HEAVY_MODULE_LOADED</code> present in both</div></div>
+  </div>
+
+  <div class="callout warn">
+    <h4>The mental model that matters</h4>
+    <p>Inline requires is a <strong>startup-time optimization, not a size optimization</strong>, and it is
+    <strong>not dead-code elimination</strong>. It changes <em>when</em> a module's top-level code runs,
+    never <em>whether</em> it ships.</p>
+  </div>
+
+  <hr />
+
+  <h2 id="q3"><span class="num">03</span>How does Expo change Metro's behavior?</h2>
+  <p>Two meaningful differences in Expo SDK 56 — and one of them is the biggest surprise of this whole experiment.</p>
+
+  <h3>① Output format: Hermes bytecode by default</h3>
+  <p><code>expo export</code> emits <strong>Hermes bytecode</strong> (<code>.hbc</code>), not JavaScript.
+  You need <code>--no-bytecode</code> to get readable JS. By contrast <code>react-native bundle</code> emits
+  JS and Hermes compilation is a separate step.</p>
+  <pre><code><span class="c"># Expo default output</span>
+_expo/static/js/ios/index-6d947bbb….<span class="hl">hbc</span>   (<span class="n">1.6</span> MB, Hermes bytecode)
+
+<span class="c"># with --no-bytecode</span>
+_expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable JavaScript)</code></pre>
+
+  <h3>② Expo does <em>not</em> enable inline requires by default</h3>
+  <p>This contradicts the widespread belief that "Expo turns inline requires on for you." Straight from
+  <code>@expo/metro-config</code>'s <code>ExpoMetroConfig.js</code>:</p>
+  <pre><code><span class="fn">getTransformOptions</span>: <span class="k">async</span> () => ({
+  transform: {
+    experimentalImportSupport: <span class="add">true</span>,
+    inlineRequires: <span class="del">false</span>,   <span class="c">// &lt;- NOT inlined by default</span>
+  },
+}),</code></pre>
+
+  <p>So the Expo default keeps requires <strong>eager</strong> (confirmed in the emitted bundle):</p>
+  <pre><code><span class="k">var</span> _react = <span class="fn">require</span>(_dependencyMap[<span class="n">0</span>]);
+<span class="k">var</span> _reactNative = <span class="fn">require</span>(_dependencyMap[<span class="n">1</span>]);
+<span class="k">var</span> _heavy = <span class="fn">require</span>(_dependencyMap[<span class="n">2</span>]);        <span class="c">// eager in Expo default!</span>
+<span class="k">var</span> _rarelyUsed = <span class="fn">require</span>(_dependencyMap[<span class="n">3</span>]);   <span class="c">// eager in Expo default!</span></code></pre>
+
+  <div class="callout surprise">
+    <h4>Surprise</h4>
+    <p>If you want deferred evaluation on Expo, you must enable <code>inlineRequires: true</code> yourself in
+    <code>metro.config.js</code>. It composes fine with <code>experimentalImportSupport</code> — I verified that
+    forcing it on pushes the <code>heavy</code>/<code>rare</code> requires back into the handlers, exactly like vanilla.</p>
+  </div>
+
+  <p>Expo also ships an <em>experimental</em> tree-shaking / "reconcile" serializer
+  (<code>treeShakeSerializerPlugin</code>, gated behind <code>EXPO_UNSTABLE_TREE_SHAKING</code>) that can re-run
+  the transform with <code>inlineRequires</code>/<code>nonInlinedRequires</code> and actually drop code — but it's off by default.</p>
+
+  <hr />
+
+  <h2 id="q4"><span class="num">04</span>Does Metro support bundle splitting? Does Hermes benefit?</h2>
+  <p><strong>On native: no real bundle splitting.</strong> A production native build emits a single bundle
+  (then, with Hermes, a single <code>.hbc</code>). I added <code>await import('./lazy')</code> to test it. Metro
+  compiles <code>import()</code> into an <strong>async require of an already-bundled module</strong>:</p>
+
+  <pre><code><span class="c">// import('./lazy') becomes asyncRequire(moduleId, paths)</span>
+<span class="k">var</span> e = (<span class="k">yield</span> <span class="hl"><span class="fn">_r</span>(d[<span class="n">9</span>])</span>(d[<span class="n">8</span>], d.paths)).lazyGreeting;
+<span class="c">//          ^asyncRequire  ^moduleId of ./lazy (still in this bundle)</span></code></pre>
+
+  <p>The lazy module still ships inside the one bundle (<code>LAZY_CHUNK_EVALUATED</code> is present), and
+  <strong>no separate chunk file is emitted</strong> by either <code>react-native bundle</code> or
+  <code>expo export</code>. So <code>import()</code> on native = deferred <em>evaluation</em>, not code splitting.
+  Multi-chunk splitting is a Metro/Expo <em>web</em> feature.</p>
+
+  <div class="callout">
+    <h4>The Hermes angle</h4>
+    <p>Hermes precompiles the whole bundle to bytecode and <strong>lazily compiles function bodies on first
+    call</strong>. That already avoids eagerly parsing everything at startup, which makes RAM bundles obsolete
+    and <em>reduces</em> the value of inline requires. The remaining win under Hermes is deferring module
+    <strong>top-level evaluation</strong> (side effects, object construction) — not parse cost. Hermes does not
+    benefit from "splitting" because there's no separate-chunk loading on native.</p>
+  </div>
+
+  <hr />
+
+  <h2 id="q5"><span class="num">05</span>When you want to defer JS work, what pattern should you use?</h2>
+  <p>In order of leverage:</p>
+  <ol>
+    <li><strong><code>inlineRequires: true</code></strong> — cheapest, global; defers module top-level
+    evaluation until first use. A good default for startup. (On Expo you must enable it explicitly.)</li>
+    <li><strong>Dynamic <code>import()</code> / <code>React.lazy</code> + <code>Suspense</code></strong> for
+    genuinely on-demand-heavy work (a screen, a parser, a charting lib). On native it won't split files, but it
+    moves evaluation off the startup path behind an explicit async boundary.</li>
+    <li><strong>Don't do work at module top-level.</strong> Keep side-effectful init inside functions so inline
+    requires / <code>import()</code> can actually defer it. Inline requires can't help a module whose work runs on
+    the render path.</li>
+    <li>If you want to defer <em>and</em> care about size, you also need <strong>tree shaking</strong> — deferral
+    alone never reduces what ships.</li>
+  </ol>
+
+  <hr />
+
+  <h2 id="q6"><span class="num">06</span>How does rnx-kit help?</h2>
+  <p>rnx-kit's headline feature here is <strong>real tree shaking / dead-code elimination</strong> via the
+  <strong>esbuild serializer</strong> (<code>@rnx-kit/metro-serializer-esbuild</code>), enabled with
+  <code>rnx-cli bundle --tree-shake</code>. The serializer hands Metro's module graph to esbuild, which does
+  scope hoisting and tree shaking. The output is a completely different artifact — an esbuild IIFE bundle, not
+  Metro's <code>__d(...)</code> registry:</p>
+
+  <pre><code><span class="c">// esbuild output (unminified) — note the readable file-path comments</span>
+(() => {
+  <span class="k">var</span> __commonJS = (cb, mod) => <span class="k">function</span> <span class="fn">__require</span>() { ... };
+
+  <span class="c">// node_modules/@react-native/js-polyfills/console.js</span>
+  <span class="k">var</span> require_console = <span class="fn">__commonJS</span>({
+    <span class="s">"node_modules/@react-native/js-polyfills/console.js"</span>(exports) { ... }
+  });</code></pre>
+
+  <div class="callout warn">
+    <h4>The gotcha that cost me real DCE</h4>
+    <p>esbuild can only tree-shake <strong>ESM</strong>. But <code>@react-native/babel-preset</code> rewrites
+    <code>import/export</code> to CommonJS by default, which esbuild treats as opaque — so nothing gets dropped.
+    The fix is <code>disableImportExportTransform: true</code> for the production tree-shake build (or use
+    <code>@rnx-kit/babel-preset-metro-react-native</code>). Until I set that, the unused export survived and the
+    bundle didn't shrink at all.</p>
+  </div>
+
+  <p>With ESM preserved, the results are dramatic. I added a deliberately unused export
+  (<code>deadExport → 'DEAD_CODE_MARKER_SHOULD_BE_REMOVED'</code>):</p>
+
+  <div class="cards">
+    <div class="card"><h5>Unused export</h5><div class="big">removed</div><div class="small">present in vanilla/Expo, gone here</div></div>
+    <div class="card"><h5>Minified size</h5><div class="big">992 → 807 KB</div><div class="small">≈19% smaller, across the whole graph</div></div>
+    <div class="card"><h5>Output</h5><div class="big">esbuild IIFE</div><div class="small">+ <code>--metafile</code> for analysis</div></div>
+  </div>
+
+  <p>Beyond tree shaking, rnx-kit also adds duplicate- and cyclic-dependency detection, robust
+  monorepo/symlink resolution (<code>@rnx-kit/metro-config</code>), esbuild metafile bundle analysis, and
+  dependency alignment (<code>align-deps</code>). What it does <strong>not</strong> magically add is true native
+  bundle splitting into separately-loaded chunks — that remains a web concept.</p>
+
+  <hr />
+
+  <h2>The whole picture, on one app</h2>
+  <p>Same shared app, minified, iOS:</p>
+  <table>
+    <thead>
+      <tr><th>Setup</th><th>What it does to requires</th><th>Tree-shakes?</th><th>Output</th><th>Size</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Vanilla — <code>inlineRequires: false</code></td><td>eager, top of module</td><td><span class="no">no</span></td><td>Metro <code>__d</code> JS</td><td>992 KB</td></tr>
+      <tr><td>Vanilla — <code>inlineRequires: true</code></td><td>move <code>require()</code> to first use</td><td><span class="no">no</span></td><td>Metro <code>__d</code> JS</td><td>~992 KB</td></tr>
+      <tr><td>Expo (default)</td><td>eager (<code>experimentalImportSupport</code>)</td><td><span class="no">no</span></td><td>Hermes <code>.hbc</code></td><td>1.6 MB*</td></tr>
+      <tr><td>rnx-kit <code>--tree-shake</code></td><td>esbuild scope hoisting</td><td><span class="yes">yes</span></td><td>esbuild IIFE</td><td>807 KB</td></tr>
+    </tbody>
+  </table>
+  <p class="small" style="color:var(--muted);font-size:13.5px">*Expo's plain minified JS was ~1 MB; the
+  <code>.hbc</code> is bytecode, so it isn't directly size-comparable. The takeaway: inline requires barely
+  moves <em>size</em> — it's a startup/TTI lever. Tree shaking is the only one of these that meaningfully
+  shrinks the bundle.</p>
+
+  <div class="callout tldr">
+    <h4>Final takeaways</h4>
+    <p>① Inline requires defers <em>evaluation</em>, not inclusion — a startup win, not a size win.<br/>
+    ② Expo SDK 56 ships <code>inlineRequires: false</code> by default; enable it yourself if you want it.<br/>
+    ③ Native is always one bundle — <code>import()</code> defers, it doesn't split; Hermes already lazy-compiles.<br/>
+    ④ Want a smaller bundle? You need tree shaking, and rnx-kit's esbuild path is the practical way to get it.</p>
+  </div>
+
+  <footer>
+    Built by bundling one shared React Native app three ways and reading the bytes.<br/>
+    Reproduce: <code>npm run bundle:*</code> in each of <code>vanilla-rn/</code>, <code>expo-app/</code>, <code>rnx-kit-app/</code>.
+  </footer>
+
+</div>
+</body>
+</html>
