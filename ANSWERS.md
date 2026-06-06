@@ -44,8 +44,13 @@ Consequences:
   that needs it first executes (improves startup / time-to-interactive).
 - It is purely a *when-does-it-evaluate* change. The module is **still in the
   bundle**; nothing is removed, nothing is split out.
-- Bindings used on the render/initial path (e.g. `react-native` in JSX) stay
-  hoisted; only bindings used solely inside deferred code get inlined.
+- Not every require is inlined. The transform skips a default block list
+  (`nonInlinedRequires`: `React`, `react`, `react/jsx-runtime`,
+  `react/jsx-dev-runtime`, `react-compiler-runtime`, `react-native`) and skips
+  requires wrapped in interop helpers (`_interopRequireDefault(require(...))`).
+  That — NOT any "is it on the render path" analysis — is why `react-native`
+  stays hoisted while `heavy`/`rare` get inlined. (Verified: emptying the block
+  list inlines `react-native` straight into the JSX too.)
 
 ## 2. With Metro `inlineRequires: true`, what does the bundle look like?
 
@@ -60,10 +65,10 @@ the dependency map is fully evaluated on load:
 onPress:()=>{ (0,o.heavyCompute)(1e3) }       // uses pre-required binding
 ```
 
-`inlineRequires: true` — requires used only inside callbacks are pushed into the
-callbacks; only render-path requires remain at top:
+`inlineRequires: true` — non-block-listed requires are pushed to their use site;
+block-listed ones (react, react-native, jsx runtime) remain hoisted:
 ```js
-...,n=_r(d[3]),o=_r(d[4])},2,[1,3,9,11,243,502,503]);   // react-native, jsx only
+...,n=_r(d[3]),o=_r(d[4])},2,[1,3,9,11,243,502,503]);   // react-native, jsx (block-listed)
 onPress:()=>{ (0,_r(d[5]).heavyCompute)(1e3); _r(d[5]).HEAVY_TAG }
 onPress:()=>{ _r(d[6]).formatRare('inlined requires') }
 ```
@@ -107,7 +112,7 @@ Expo additionally ships an experimental **tree-shaking / "reconcile" serializer*
 
 ## 4. Does RN Metro support bundle splitting? Does Hermes benefit?
 
-**Native: no real bundle splitting.** A production native build emits a single
+**React Native: no real bundle splitting.** A production React Native build emits a single
 bundle (then, with Hermes, a single `.hbc`). We added `await import('./lazy')`
 and confirmed:
 - Metro compiles `import()` into an **async require of an already-bundled
@@ -118,8 +123,8 @@ and confirmed:
 - The lazy module still ships inside the one bundle; **no separate chunk file**
   is emitted by either `react-native bundle` or `expo export`.
 
-So `import()` on native = *deferred evaluation*, not *code splitting*. Web-style
-multi-chunk splitting is a Metro/Expo **web** capability, not native.
+So `import()` in React Native = *deferred evaluation*, not *code splitting*. Web-style
+multi-chunk splitting is a Metro/Expo **web** capability, not React Native.
 
 **Hermes:** Hermes precompiles the whole bundle to bytecode and **lazily
 compiles function bodies on first call**, so it already avoids eagerly parsing
@@ -127,7 +132,7 @@ everything at startup. That makes RAM bundles obsolete and reduces (but doesn't
 eliminate) the value of inline requires — the remaining win under Hermes is
 deferring module **top-level evaluation** (side effects / object construction),
 not parse cost. Hermes does not benefit from splitting because there is no
-separate-chunk loading on native.
+separate-chunk loading in React Native.
 
 ## 5. When the intent is to defer JavaScript work, what pattern should we use?
 
@@ -137,12 +142,12 @@ In order of leverage:
    top-level evaluation until first use. Great default for startup. (On Expo,
    you must enable it explicitly.)
 2. **Dynamic `import()` / `React.lazy` + `Suspense`** for genuinely
-   on-demand-heavy work (e.g. a screen, a parser, a charting lib). On native it
-   won't split files, but it defers evaluation off the startup path and gives
-   you an explicit async boundary.
+   on-demand-heavy work (e.g. a screen, a parser, a charting lib). In React
+   Native it won't split files, but it defers evaluation off the startup path and
+   gives you an explicit async boundary (Promise + Suspense fallback).
 3. **Don't import work at module top-level.** Keep side-effectful initialization
    inside functions so inline requires / `import()` can actually defer it.
-   Inline requires can't help a module whose work runs on the render path.
+   Inline requires can't help a module whose work runs at import time on the startup path.
 4. If you want to defer *and* you care about size, you also need **tree shaking**
    (next question) — deferral alone never reduces what ships.
 
@@ -175,8 +180,8 @@ cyclic-dependency detection, robust monorepo/symlink resolution
 alignment (`align-deps`), and a typed bundle config (`rnx-kit` field /
 multi-bundle definitions).
 
-What rnx-kit does **not** magically add: true native bundle splitting into
-separately-loaded chunks — that remains a non-native (web) concept.
+What rnx-kit does **not** magically add: true React Native bundle splitting into
+separately-loaded chunks — that remains a web-only concept.
 
 ---
 

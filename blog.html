@@ -145,7 +145,7 @@
     <p>Inline requires moves <code>require()</code> to the first use site to defer <em>evaluation</em> —
     it does <strong>not</strong> remove code and does <strong>not</strong> split the bundle. Expo SDK 56
     does <strong>not</strong> enable inline requires by default (it uses <code>experimentalImportSupport</code>).
-    Only rnx-kit's esbuild tree-shaking actually shrinks the bundle (≈19% here). On native there is one
+    Only rnx-kit's esbuild tree-shaking actually shrinks the bundle (≈19% here). In React Native there is one
     bundle; <code>import()</code> defers evaluation, it doesn't create chunks.</p>
   </div>
 
@@ -216,7 +216,76 @@
   <ul>
     <li>The imported module's <strong>top-level code runs lazily</strong> — only when the path that needs it first executes. That's the startup / time-to-interactive win.</li>
     <li>It's purely a <em>when-does-it-evaluate</em> change. The module is <strong>still in the bundle</strong>; nothing is removed or split out.</li>
-    <li>Bindings used on the render path (e.g. <code>react-native</code> in JSX) stay hoisted; only bindings used <em>solely</em> inside deferred code get inlined.</li>
+    <li>Not <em>every</em> <code>require</code> gets inlined. There's a default block list (and a couple of shape rules) — see below.</li>
+  </ul>
+
+  <h3>Wait — why did <code>react-native</code> stay at the top but <code>heavy</code> got inlined?</h3>
+  <p>My first instinct was "bindings used during render stay hoisted, bindings used only in deferred code get
+  inlined." <strong>That's wrong</strong>, and it's worth correcting because it's a common misconception. The
+  real rules are mechanical, and they live in the transform — not in any analysis of "is this on the render
+  path."</p>
+
+  <p>The plugin (<code>metro-transform-plugins → inline-requires</code>) walks the module, finds each
+  top-level <code>var x = require(…)</code>, and rewrites <strong>every</strong> reference to <code>x</code>
+  into an inline <code>require(…)</code> at the use site, then deletes the top declaration. It would happily do
+  that to <code>react-native</code> too. Two things stop it:</p>
+
+  <ul>
+    <li><strong>A default block list</strong> (<code>nonInlinedRequires</code>). Metro ships
+      <code>baseIgnoredInlineRequires</code> and never inlines these:
+      <pre><code><span class="c">// metro/src/lib/transformHelpers.js</span>
+<span class="k">const</span> baseIgnoredInlineRequires = [
+  <span class="s">"React"</span>, <span class="s">"react"</span>, <span class="s">"react/jsx-dev-runtime"</span>, <span class="s">"react/jsx-runtime"</span>,
+  <span class="s">"react-compiler-runtime"</span>, <span class="s">"react-native"</span>,
+];</code></pre>
+      These modules are needed on basically every render, so inlining them would just add a (cheap, but
+      pointless) <code>require()</code> lookup to hot paths for zero startup benefit. <code>heavy</code> and
+      <code>rare</code> aren't on the list, so they get inlined.</li>
+    <li><strong>Requires wrapped in an interop helper aren't matched.</strong> <code>import x from 'm'</code>
+      compiles to <code>var x = _interopRequireDefault(require('m'))</code>. The thing assigned isn't a bare
+      <code>require()</code> call, so the plugin leaves it alone. That's why the Babel runtime helpers
+      (<code>slicedToArray</code>, <code>asyncToGenerator</code>) and <code>React</code> (imported as a default
+      + namespace) stayed hoisted as well.</li>
+  </ul>
+
+  <p>To prove it wasn't about "render path," I emptied the block list
+  (<code>nonInlinedRequires: []</code>) and rebuilt. Now <code>react-native</code> and the JSX runtime
+  <em>do</em> get inlined straight into the JSX — exactly like <code>heavy</code>:</p>
+  <pre><code><span class="c">// inlineRequires:true + nonInlinedRequires:[]  (block list emptied)</span>
+<span class="k">return</span>(<span class="n">0</span>,<span class="hl"><span class="fn">_r</span>(d[<span class="n">8</span>])</span>.jsxs)(<span class="hl"><span class="fn">_r</span>(d[<span class="n">9</span>])</span>.View, { ... });
+<span class="c">//        ^jsx-runtime inlined   ^react-native inlined — no top-level vars left</span></code></pre>
+
+  <p>One more detail: by default inline requires is <strong>not memoized</strong>
+  (<code>unstable_memoizeInlineRequires: false</code>), so a module used twice in a handler emits the
+  <code>require()</code> twice (e.g. <code>_r(d[6]).heavyCompute</code> and <code>_r(d[6]).HEAVY_TAG</code>).
+  That's fine — <code>require()</code> is just a cached lookup into the module registry after first evaluation.</p>
+
+  <h3>How this differs from a manual inline <code>require()</code> or <code>React.lazy</code></h3>
+  <p>The <code>inlineRequires</code> flag is the <em>automatic, synchronous</em> version of a pattern you can
+  also do by hand. These three express increasingly explicit deferral:</p>
+  <pre><code><span class="c">// 1. Automatic — the inlineRequires transform does this for you, no async:</span>
+<span class="k">import</span> { heavyCompute } <span class="k">from</span> <span class="s">'./heavy'</span>;
+<span class="k">const</span> onPress = () => <span class="fn">heavyCompute</span>(<span class="n">1000</span>);   <span class="c">// require('./heavy') moved here at build time</span>
+
+<span class="c">// 2. Manual inline require — same idea, written explicitly, still synchronous:</span>
+<span class="k">const</span> onPress = () => <span class="fn">require</span>(<span class="s">'./heavy'</span>).<span class="fn">heavyCompute</span>(<span class="n">1000</span>);
+
+<span class="c">// 3. React.lazy — ASYNC; built on dynamic import(), used for whole components:</span>
+<span class="k">const</span> Screen = React.<span class="fn">lazy</span>(() => <span class="fn">import</span>(<span class="s">'./HeavyScreen'</span>));
+<span class="c">// &lt;Suspense fallback={...}&gt;&lt;Screen/&gt;&lt;/Suspense&gt;</span></code></pre>
+  <p>Options 1 and 2 are <strong>synchronous</strong>: the module is evaluated the first time the handler runs,
+  on the same tick. <code>React.lazy</code> is <strong>asynchronous</strong> — it takes a function returning a
+  <em>Promise</em> of <code>{ default: Component }</code>, and Metro compiles that <code>import()</code> into an
+  <code>asyncRequire(moduleId)</code> (we'll see this in <a href="#q4">Q4</a>). React's <code>Suspense</code>
+  shows a fallback until the promise resolves. Crucially, in React Native this <em>still</em> resolves a module
+  that's already in the same bundle — <code>React.lazy</code> defers evaluation behind an async boundary, it
+  does not download a separate chunk. So:</p>
+  <ul>
+    <li><strong>inline require (auto or manual)</strong> → defer evaluation of a synchronous dependency, no
+    code change needed (auto), no async boundary, no <code>Suspense</code>.</li>
+    <li><strong><code>React.lazy</code> / <code>import()</code></strong> → defer evaluation of a heavier unit
+    (often a whole screen) behind an explicit <code>Promise</code> + <code>Suspense</code> boundary; lets you
+    render a fallback while it initializes.</li>
   </ul>
 
   <hr />
@@ -232,14 +301,15 @@
 <span class="c">//        ^heavy    ^rare  evaluated on load</span>
 onPress:()=>{ (<span class="n">0</span>,o.<span class="fn">heavyCompute</span>)(<span class="n">1e3</span>) }   <span class="c">// uses pre-required binding `o`</span></code></pre>
 
-  <p class="pre-label good">inlineRequires: true — only render-path requires stay at top; handlers require lazily</p>
+  <p class="pre-label good">inlineRequires: true — block-listed requires (react, react-native, jsx) stay at top; the rest move to the use site</p>
   <pre><code>...,n=<span class="fn">_r</span>(d[<span class="n">3</span>]),o=<span class="fn">_r</span>(d[<span class="n">4</span>])},2,[1,3,9,11,243,502,503]);  <span class="c">// react-native + jsx only</span>
 
 onPress:()=>{ <span class="k">var</span> e=(<span class="n">0</span>,<span class="hl"><span class="fn">_r</span>(d[<span class="n">5</span>])</span>.<span class="fn">heavyCompute</span>)(<span class="n">1e3</span>); <span class="hl"><span class="fn">_r</span>(d[<span class="n">5</span>])</span>.HEAVY_TAG }
 onPress:()=>{ <span class="hl"><span class="fn">_r</span>(d[<span class="n">6</span>])</span>.<span class="fn">formatRare</span>(<span class="s">'inlined requires'</span>) }</code></pre>
 
-  <p>Notice <code>react-native</code> (used during render) stays hoisted as <code>n=_r(d[3])</code>, while
-  <code>heavy</code> and <code>rare</code> got pushed <em>into</em> the click handlers.</p>
+  <p>Notice <code>react-native</code> stays hoisted as <code>n=_r(d[3])</code> (it's on Metro's default block
+  list, see <a href="#q1">Q1</a>), while <code>heavy</code> and <code>rare</code> got pushed <em>into</em> the
+  click handlers.</p>
 
   <div class="cards">
     <div class="card"><h5>Module count</h5><div class="big">506 → 504</div><div class="small">essentially unchanged</div></div>
@@ -299,8 +369,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
   <hr />
 
   <h2 id="q4"><span class="num">04</span>Does Metro support bundle splitting? Does Hermes benefit?</h2>
-  <p><strong>On native: no real bundle splitting.</strong> A production native build emits a single bundle
-  (then, with Hermes, a single <code>.hbc</code>). I added <code>await import('./lazy')</code> to test it. Metro
+  <p><strong>In React Native: no real bundle splitting.</strong> A production React Native build emits a single
+  bundle (then, with Hermes, a single <code>.hbc</code>). I added <code>await import('./lazy')</code> to test it. Metro
   compiles <code>import()</code> into an <strong>async require of an already-bundled module</strong>:</p>
 
   <pre><code><span class="c">// import('./lazy') becomes asyncRequire(moduleId, paths)</span>
@@ -309,7 +379,7 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
 
   <p>The lazy module still ships inside the one bundle (<code>LAZY_CHUNK_EVALUATED</code> is present), and
   <strong>no separate chunk file is emitted</strong> by either <code>react-native bundle</code> or
-  <code>expo export</code>. So <code>import()</code> on native = deferred <em>evaluation</em>, not code splitting.
+  <code>expo export</code>. So <code>import()</code> in React Native = deferred <em>evaluation</em>, not code splitting.
   Multi-chunk splitting is a Metro/Expo <em>web</em> feature.</p>
 
   <div class="callout">
@@ -318,7 +388,7 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     call</strong>. That already avoids eagerly parsing everything at startup, which makes RAM bundles obsolete
     and <em>reduces</em> the value of inline requires. The remaining win under Hermes is deferring module
     <strong>top-level evaluation</strong> (side effects, object construction) — not parse cost. Hermes does not
-    benefit from "splitting" because there's no separate-chunk loading on native.</p>
+    benefit from "splitting" because there's no separate-chunk loading in React Native.</p>
   </div>
 
   <hr />
@@ -329,11 +399,11 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
     <li><strong><code>inlineRequires: true</code></strong> — cheapest, global; defers module top-level
     evaluation until first use. A good default for startup. (On Expo you must enable it explicitly.)</li>
     <li><strong>Dynamic <code>import()</code> / <code>React.lazy</code> + <code>Suspense</code></strong> for
-    genuinely on-demand-heavy work (a screen, a parser, a charting lib). On native it won't split files, but it
+    genuinely on-demand-heavy work (a screen, a parser, a charting lib). In React Native it won't split files, but it
     moves evaluation off the startup path behind an explicit async boundary.</li>
     <li><strong>Don't do work at module top-level.</strong> Keep side-effectful init inside functions so inline
-    requires / <code>import()</code> can actually defer it. Inline requires can't help a module whose work runs on
-    the render path.</li>
+    requires / <code>import()</code> can actually defer it. Inline requires can't help a module whose work runs at
+    import time on the startup path.</li>
     <li>If you want to defer <em>and</em> care about size, you also need <strong>tree shaking</strong> — deferral
     alone never reduces what ships.</li>
   </ol>
@@ -376,8 +446,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
 
   <p>Beyond tree shaking, rnx-kit also adds duplicate- and cyclic-dependency detection, robust
   monorepo/symlink resolution (<code>@rnx-kit/metro-config</code>), esbuild metafile bundle analysis, and
-  dependency alignment (<code>align-deps</code>). What it does <strong>not</strong> magically add is true native
-  bundle splitting into separately-loaded chunks — that remains a web concept.</p>
+  dependency alignment (<code>align-deps</code>). What it does <strong>not</strong> magically add is true
+  React Native bundle splitting into separately-loaded chunks — that remains a web concept.</p>
 
   <hr />
 

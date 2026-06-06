@@ -43,21 +43,35 @@ only referenced inside `onPress` handlers.
   //         ^heavy   ^rare  (evaluated at module init)
   // call site: (0,o.heavyCompute)(1e3)  // uses pre-required binding `o`
   ```
-- `inlineRequires: true` (inline/lazy) — requires for modules used only inside
-  callbacks are MOVED INTO the call site; the top only keeps requires used on
-  the render path:
+- `inlineRequires: true` (inline/lazy) — non-block-listed requires are MOVED
+  INTO the call site; block-listed ones stay hoisted:
   ```js
-  // top keeps: t,r (react), n (react-native), o (jsx-runtime)
+  // top keeps: t,r (react), n (react-native), o (jsx-runtime) -> all block-listed
   ...,n=_r(d[3]),o=_r(d[4])},2,[1,3,9,11,243,502,503]);
   // call site now requires lazily:
   onPress:()=>{var e=(0,_r(d[5]).heavyCompute)(1e3); ... _r(d[5]).HEAVY_TAG ...}
   onPress:()=>{ ... _r(d[6]).formatRare('inlined requires') ... }
   ```
 
+**CORRECTION (important):** my first read was "render-path bindings stay
+hoisted." WRONG. The transform inlines EVERY matching `var x = require(...)`
+reference to its use site. `react-native`/`react`/jsx stay hoisted for two
+mechanical reasons, not because of render usage:
+1. Default block list `nonInlinedRequires` (metro/src/lib/transformHelpers.js
+   `baseIgnoredInlineRequires`): `React, react, react/jsx-runtime,
+   react/jsx-dev-runtime, react-compiler-runtime, react-native`.
+2. Requires wrapped in interop helpers (`_interopRequireDefault(require(...))`)
+   aren't a bare `require()` call, so the plugin skips them (covers React + the
+   babel runtime helpers).
+PROOF: setting `nonInlinedRequires: []` inlines react-native straight into the
+JSX (`(0,_r(d[8]).jsxs)(_r(d[9]).View,...)`), no top-level vars left.
+Also: inline requires is NOT memoized by default
+(`unstable_memoizeInlineRequires: false`), so a module used twice in a handler
+emits `require()` twice (cheap — cached registry lookup).
+
 **Key takeaways:**
-- `react-native` (used during render) stays hoisted; `heavy`/`rare` (used only
-  in handlers) get inlined to the handler. So the transform = "move `require()`
-  to first use", deferring *evaluation*, not *inclusion*.
+- The transform = "move `require()` to first use" (minus the block list),
+  deferring *evaluation*, not *inclusion*.
 - Bundle SIZE is essentially unchanged (eager 992,261 B vs inline 993,386 B —
   inline is even slightly larger). Module COUNT unchanged (506 vs 504).
 - The heavy module is STILL in the bundle (`HEAVY_MODULE_LOADED` present).
@@ -104,7 +118,7 @@ by default" — in SDK 56 the default is `experimentalImportSupport: true` +
 Forcing it back on (`EXPO_INLINE=on` → `inlineRequires: true`) reproduces the
 deferred behavior, and it composes with experimentalImportSupport:
 ```js
-var _react = require(...); var _reactNative = require(...);   // render path, eager
+var _react = require(...); var _reactNative = require(...);   // block-listed, eager
 runHeavy = () => { var result = (0, require(_dependencyMap[3]).heavyCompute)(1000); ... }
 runRare  = () => { setOutput((0, require(_dependencyMap[4]).formatRare)('...')); }
 ```
@@ -161,12 +175,12 @@ var e = (yield _r(d[9])(d[8], d.paths)).lazyGreeting;
 ```
 - The lazy module is STILL in the single output bundle (`LAZY_CHUNK_EVALUATED`
   present). No separate chunk file is emitted — both vanilla `react-native
-  bundle` and `expo export` produce exactly ONE js/hbc file for native.
-- So `import()` on native = runtime *deferral of evaluation* (module factory
+  bundle` and `expo export` produce exactly ONE js/hbc file in React Native.
+- So `import()` in React Native = runtime *deferral of evaluation* (module factory
   runs on first await), NOT a separate downloadable chunk. Same shipping cost,
   better startup.
 - Web-style code splitting (multiple chunks) is a Metro/Expo *web* feature; for
-  native production the norm is a single bundle compiled to Hermes bytecode.
+  React Native production the norm is a single bundle compiled to Hermes bytecode.
 
 **Hermes angle:** Hermes precompiles the whole bundle to bytecode and lazily
 compiles function bodies on first call. That already gives much of what
