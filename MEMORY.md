@@ -150,3 +150,41 @@ So rnx-kit's headline win over vanilla/Expo defaults = real **dead-code
 elimination / tree shaking**, which plain Metro (inlineRequires) does not do.
 `--metafile` emits an esbuild metafile for bundle analysis.
 
+### Dynamic import() / bundle splitting (Q4, Q5)
+
+Added `lazy.js` loaded via `await import('./lazy')`.
+
+Metro compiles `import('./lazy')` to an **async require** within the SAME bundle:
+```js
+var e = (yield _r(d[9])(d[8], d.paths)).lazyGreeting;
+//            ^asyncRequire ^moduleId
+```
+- The lazy module is STILL in the single output bundle (`LAZY_CHUNK_EVALUATED`
+  present). No separate chunk file is emitted — both vanilla `react-native
+  bundle` and `expo export` produce exactly ONE js/hbc file for native.
+- So `import()` on native = runtime *deferral of evaluation* (module factory
+  runs on first await), NOT a separate downloadable chunk. Same shipping cost,
+  better startup.
+- Web-style code splitting (multiple chunks) is a Metro/Expo *web* feature; for
+  native production the norm is a single bundle compiled to Hermes bytecode.
+
+**Hermes angle:** Hermes precompiles the whole bundle to bytecode and lazily
+compiles function bodies on first call. That already gives much of what
+inline-requires/RAM-bundles aimed for (avoid parsing everything eagerly). RAM
+bundles are effectively obsolete with Hermes. The remaining win from
+inlineRequires/`import()` under Hermes is deferring module top-level
+*evaluation* (side effects, building objects), not parse cost.
+
+### Summary table (minified, ios, this shared app)
+
+| Setup                         | What it does to requires        | DCE? | Output         | Size    |
+|-------------------------------|---------------------------------|------|----------------|---------|
+| Vanilla, inlineRequires:false | eager top-of-module             | no   | Metro __d JS   | 992 KB  |
+| Vanilla, inlineRequires:true  | move require() to first use      | no   | Metro __d JS   | ~992 KB |
+| Expo default                  | eager (experimentalImportSupport)| no  | Hermes .hbc    | 1.6 MB* |
+| rnx-kit --tree-shake (esbuild)| (esbuild scope hoisting)        | YES  | esbuild IIFE   | 807 KB  |
+
+*Expo's plain JS (minified) was ~1 MB; .hbc is bytecode so not size-comparable.
+Inline requires barely moves SIZE — it's a startup/TTI lever. Tree shaking is
+the only one of these that meaningfully shrinks the bundle.
+

@@ -1,3 +1,12 @@
+# Research status
+
+Answers to all questions below live in **[ANSWERS.md](./ANSWERS.md)** (blog-post
+ready). The raw investigation log is in **[MEMORY.md](./MEMORY.md)**. Three
+runnable setups consume one shared app (`shared-app/`): `vanilla-rn/`,
+`expo-app/`, `rnx-kit-app/` — see "How to reproduce" in ANSWERS.md.
+
+---
+
 How does React Native inlined requires work?
 
 Metro has a flag for enabling inlined requires, but looks like Expo handles it a

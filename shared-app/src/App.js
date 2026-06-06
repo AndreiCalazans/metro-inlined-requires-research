@@ -20,12 +20,19 @@ export default function App() {
     setOutput(formatRare('inlined requires'));
   };
 
+  const runLazy = async () => {
+    // Dynamic import: the deferral pattern for splitting JS work off startup.
+    const { lazyGreeting } = await import('./lazy');
+    setOutput(lazyGreeting());
+  };
+
   return (
     <View>
       <Text>Metro Inlined Requires Demo</Text>
       <Text>{output}</Text>
       <Button title="Run heavy" onPress={runHeavy} />
       <Button title="Run rare" onPress={runRare} />
+      <Button title="Run lazy" onPress={runLazy} />
     </View>
   );
 }
