@@ -411,7 +411,8 @@ _expo/static/js/ios/index-6d947bbb….<span class="hl">js</span>    (readable Ja
   <hr />
 
   <h2 id="q6"><span class="num">06</span>How does rnx-kit help?</h2>
-  <p>rnx-kit's headline feature here is <strong>real tree shaking / dead-code elimination</strong> via the
+  <p>rnx-kit's headline feature here is <strong>real tree shaking / dead-code elimination (DCE)</strong> &mdash;
+  removing exports and modules that are never used so they don't ship &mdash; via the
   <strong>esbuild serializer</strong> (<code>@rnx-kit/metro-serializer-esbuild</code>), enabled with
   <code>rnx-cli bundle --tree-shake</code>. The serializer hands Metro's module graph to esbuild, which does
   scope hoisting and tree shaking. The output is a completely different artifact — an esbuild IIFE bundle, not
