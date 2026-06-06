@@ -1,0 +1,19 @@
+{
+  "name": "vanilla-rn-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "bundle:eager": "react-native bundle --platform ios --dev false --entry-file index.js --bundle-output ./out/eager.bundle --config metro.config.eager.js",
+    "bundle:inline": "react-native bundle --platform ios --dev false --entry-file index.js --bundle-output ./out/inline.bundle --config metro.config.inline.js"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-native": "^0.85.3"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^20.1.3",
+    "@react-native-community/cli-platform-ios": "^20.1.3",
+    "@react-native/babel-preset": "^0.85.3",
+    "@react-native/metro-config": "^0.85.3"
+  }
+}
