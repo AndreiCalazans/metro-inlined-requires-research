@@ -65,3 +65,53 @@ only referenced inside `onPress` handlers.
      only changes WHEN a module's top-level code runs (TTI / startup win),
      not whether it ships.
 
+### Expo (SDK 56, expo 56.0.9, RN 0.85.3, metro 0.84.4)
+
+Setup: `expo-app/` consumes the shared source via a symlink (`expo-app/shared
+-> ../shared-app/src`). Built with `npx expo export --platform ios`.
+
+NOTE: Expo's resolver rejected a relative import that escapes the project root
+(`../shared-app/...`) even with `watchFolders` set — had to use a symlink
+inside the project so the realpath lands inside a watched folder. Vanilla RN's
+resolver accepted the escaping relative path directly. (Resolver strictness
+difference worth a mention.)
+
+**Output format difference (big one):**
+- `expo export` defaults to **Hermes bytecode** → `_expo/static/js/ios/index-*.hbc`
+  (1.6 MB). You get precompiled bytecode, not JS, in the shipped app.
+- `--no-bytecode` yields a plain JS bundle (2.4 MB unminified) for inspection.
+- Vanilla `react-native bundle` (as I ran it) produced plain JS `.bundle`;
+  Hermes compilation is a separate step there.
+
+**Does Expo inline requires by default? NO.**
+`@expo/metro-config` (ExpoMetroConfig.js) default `getTransformOptions`:
+```js
+transform: { experimentalImportSupport: true, inlineRequires: false }
+```
+So by default Expo uses Metro's import/export support but keeps requires EAGER:
+```js
+// Expo default App module (top, eager):
+var _react = require(_dependencyMap[0]);
+var _reactNative = require(_dependencyMap[1]);
+var _heavy = require(_dependencyMap[2]);        // eager!
+var _rarelyUsed = require(_dependencyMap[3]);    // eager!
+// call site: (0, _heavy.heavyCompute)(1000)
+```
+This differs from the long-standing assumption that "Expo enables inlineRequires
+by default" — in SDK 56 the default is `experimentalImportSupport: true` +
+`inlineRequires: false`.
+
+Forcing it back on (`EXPO_INLINE=on` → `inlineRequires: true`) reproduces the
+deferred behavior, and it composes with experimentalImportSupport:
+```js
+var _react = require(...); var _reactNative = require(...);   // render path, eager
+runHeavy = () => { var result = (0, require(_dependencyMap[3]).heavyCompute)(1000); ... }
+runRare  = () => { setOutput((0, require(_dependencyMap[4]).formatRare)('...')); }
+```
+
+Expo ALSO ships an experimental tree-shaking / "reconcile" serializer
+(`treeShakeSerializerPlugin` / `reconcileTransformSerializerPlugin`, gated by
+`EXPO_UNSTABLE_TREE_SHAKING`) that can re-run the transform with
+`inlineRequires`/`nonInlinedRequires` — this is the path that can actually
+remove code, unlike plain inlineRequires. Off by default.
+

@@ -1,0 +1,11 @@
+{
+  "name": "expo-app-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "expo": "^56.0.9",
+    "react": "^19.2.7",
+    "react-native": "^0.85.3"
+  }
+}
